@@ -3,12 +3,16 @@ from model import SVMRNN
 import os
 import sys
 import argparse
-from utils import load_file, load_wavs, load_label, wavs_to_specs, get_next_batch, separate_magnitude_phase, load_label
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+from utils import load_file, load_wavs, wavs_to_specs, get_next_batch, separate_magnitude_phase
 
-#   训练模型，需要做以下事情
+
+
+#训练模型，需要做以下事情
 #1. 导入需要训练的数据集文件路径，存到列表中即可
 #2. 导入训练集数据，每一个训练集文件都是一个双声道的音频文件，
+#   其中，第一个声道存的是背景音乐，第二个声道存的是纯人声，
+#   我们需要三组数据，第一组是将双声道转成单声道的数据，即让背景音乐和人声混合在一起
+#   第二组数据是纯背景音乐，第三组数据是纯人声数据
 #3. 通过上一步获取的数据都是时域的，我们要通过短时傅里叶变换将声音数据转到频域
 #4. 初始化网络模型
 #5. 获取mini-batch数据，开始进行迭代训练
@@ -50,20 +54,18 @@ def main(args):
     model_filename = args.model_filename
 
     #导入训练数据集的wav数据,
-    #wavs_mono_train存的是单声道，wavs_label_train 存的是标签
-    label_train = load_label(args.dataset_label_dir,sr = mir1k_sr)
-    label_test = load_label(args.dataset_label_dir,sr = mir1k_sr)
-    wavs_mono_train, wavs_label_train = load_wavs(filenames = train_file_list, wavs_label = label_train, sr = mir1k_sr)
+    #wavs_mono_train存的是单声道，wavs_music_train 存的是背景音乐，wavs_voice_train 存的是纯人声
+    wavs_mono_train, wavs_music_train, wavs_voice_train = load_wavs(filenames = train_file_list, sr = mir1k_sr)
     # 通过短时傅里叶变换将声音转到频域
-    stfts_mono_train, stfts_label_train = wavs_to_specs(
-        wavs_mono = wavs_mono_train, wavs_label = wavs_label_train, n_fft = n_fft, 
-        hop_length = hop_length)
+    stfts_mono_train, stfts_music_train, stfts_voice_train = wavs_to_specs(
+        wavs_mono=wavs_mono_train, wavs_music=wavs_music_train, wavs_voice=wavs_voice_train, n_fft=n_fft,
+        hop_length=hop_length)
 
     # 跟上面一样，只不过这里是测试集的数据
-    wavs_mono_valid, wavs_label_valid = load_wavs(filenames = valid_file_list, wavs_label = label_test, sr=mir1k_sr)
-    stfts_mono_valid, stfts_label_valid = wavs_to_specs(
-        wavs_mono = wavs_mono_valid, wavs_label = wavs_label_valid, n_fft=n_fft,
-        hop_length = hop_length)
+    wavs_mono_valid, wavs_music_valid, wavs_voice_valid = load_wavs(filenames=valid_file_list, sr=mir1k_sr)
+    stfts_mono_valid, stfts_music_valid, stfts_voice_valid = wavs_to_specs(
+        wavs_mono=wavs_mono_valid, wavs_music=wavs_music_valid, wavs_voice=wavs_voice_valid, n_fft=n_fft,
+        hop_length=hop_length)
     
     #初始化模型
     model = SVMRNN(num_features = n_fft // 2 + 1, num_hidden_units = num_hidden_units)
@@ -80,16 +82,17 @@ def main(args):
             continue
 
         # 获取下一batch数据
-        data_mono_batch, data_label_batch = get_next_batch(
-            stfts_mono = stfts_mono_train, stfts_label = stfts_label_train,
+        data_mono_batch, data_music_batch, data_voice_batch = get_next_batch(
+            stfts_mono = stfts_mono_train, stfts_music = stfts_music_train, stfts_voice = stfts_voice_train,
             batch_size = batch_size, sample_frames = sample_frames)
 
         #获取频率值
         x_mixed_src, _ = separate_magnitude_phase(data = data_mono_batch)
-        y_label_src, _ = separate_magnitude_phase(data = data_label_batch)
+        y_music_src, _ = separate_magnitude_phase(data = data_music_batch)
+        y_voice_src, _ = separate_magnitude_phase(data = data_voice_batch)
 
         #送入神经网络，开始训练
-        train_loss = model.train(x_mixed_src = x_mixed_src, y_label_src = y_label_src,
+        train_loss = model.train(x_mixed_src = x_mixed_src, y_music_src = y_music_src, y_voice_src = y_voice_src,
                                  learning_rate = learning_rate, dropout_rate = dropout_rate)
 
         if i % 10 == 0:
@@ -98,15 +101,16 @@ def main(args):
         if i % 200 == 0:
             #这里是测试模型准确率的
             print('==============================================')
-            data_mono_batch, data_label_batch = get_next_batch(
-                stfts_mono = stfts_mono_valid, stfts_label = stfts_label_valid,
-                batch_size = batch_size, sample_frames = sample_frames)
+            data_mono_batch, data_music_batch, data_voice_batch = get_next_batch(
+                stfts_mono = stfts_mono_valid, stfts_music = stfts_music_valid,
+                stfts_voice = stfts_voice_valid, batch_size = batch_size, sample_frames = sample_frames)
 
             x_mixed_src, _ = separate_magnitude_phase(data = data_mono_batch)
-            y_label_src, _ = separate_magnitude_phase(data = data_label_batch)
+            y_music_src, _ = separate_magnitude_phase(data = data_music_batch)
+            y_voice_src, _ = separate_magnitude_phase(data = data_voice_batch)
 
-            y_sing_src_pred, validate_loss = model.validate(x_mixed_src = x_mixed_src,
-                    y_label_src = y_label_src, dropout_rate = dropout_rate)
+            y_music_src_pred, y_voice_src_pred, validate_loss = model.validate(x_mixed_src = x_mixed_src,
+                    y_music_src = y_music_src, y_voice_src = y_voice_src, dropout_rate = dropout_rate)
             print('Step: %d Validation Loss: %f' %(i, validate_loss))
             print('==============================================')
 
@@ -127,9 +131,8 @@ def main(args):
 def parse_arguments(argv):
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--dataset_train_dir', type=str, help='数据集训练数据路径', default='./data/train_data')
-    parser.add_argument('--dataset_validate_dir', type=str, help='数据集验证数据路径', default='./data/test_data')
-    parser.add_argument('--dataset_label_dir', type=str, help='数据集标签数据路径', default='./data/label_data')
+    parser.add_argument('--dataset_train_dir', type=str, help='数据集训练数据路径', default='./dataset/MIR-1K/Wavfile')
+    parser.add_argument('--dataset_validate_dir', type=str, help='数据集验证数据路径', default='./dataset/MIR-1K/UndividedWavfile')
     parser.add_argument('--model_dir', type=str, help='模型保存的文件夹', default='model')
     parser.add_argument('--model_filename', type=str, help='模型保存的文件名', default='svmrnn.ckpt')
     parser.add_argument('--dataset_sr', type=int, help='数据集音频文件的采样率', default=16000)

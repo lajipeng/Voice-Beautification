@@ -37,14 +37,15 @@ class SVMRNN(object):
         self.x_mixed_src = tf.placeholder(tf.float32, shape=[None, None, num_features], name='x_mixed_src')
 
         #背景音乐数据
-        self.y_label_src = tf.placeholder(tf.float32, shape=[None, None, num_features], name='y_label_src')
-    
+        self.y_music_src = tf.placeholder(tf.float32, shape=[None, None, num_features], name='y_music_src')
+        #人声数据
+        self.y_voice_src = tf.placeholder(tf.float32, shape=[None, None, num_features], name='y_voice_src')
 
         #keep dropout，用于RNN网络的droupout
         self.dropout_rate = tf.placeholder(tf.float32)
 
         #初始化神经网络
-        self.y_pred_sing_src = self.network_init()
+        self.y_pred_music_src, self.y_pred_voice_src = self.network_init()
 
         # 设置损失函数
         self.loss = self.loss_init()
@@ -64,17 +65,9 @@ class SVMRNN(object):
     def loss_init(self):
         with tf.variable_scope('loss') as scope:
             #求方差
-            f1 = self.y_label_src[:,0]
-            f2 = self.y_pred_sing_src[:,0]
-            mean1 = tf.reduce_mean(f1)
-            mean2 = tf.reduce_mean(f2)
-            var1 = tf.reduce_mean(tf.square(f1 - mean1), axis=-1)
-            var2 = tf.reduce_mean(tf.square(f2 - mean2), axis=-1)
-            cov12 = tf.reduce_mean(
-                (f1 - mean1) * (f2 - mean2), axis=-1)
-            pearson_r = cov12 / tf.sqrt((var1 + 1e-6) * (var2 + 1e-6))
-            raw_loss = 1 - pearson_r
-            loss = tf.reduce_sum(raw_loss,name='loss')
+            loss = tf.reduce_mean(
+                tf.square(self.y_music_src - self.y_pred_music_src)
+                + tf.square(self.y_voice_src - self.y_pred_voice_src), name='loss')
         return loss
 
     #优化器
@@ -85,7 +78,7 @@ class SVMRNN(object):
     #构建神经网络
     def network_init(self):
         rnn_layer = []
-        concatVoice = tf.concat([self.x_mixed_src, self.y_label_src], 2, 'concatVoice')
+
         #根据num_hidden_units的长度来决定创建几层RNN，每个RNN长度为size
         for size in self.num_hidden_units:
             #使用GRU，同时，加上dropout
@@ -95,19 +88,25 @@ class SVMRNN(object):
 
         #创建多层RNN
         multi_rnn_cell = tf.nn.rnn_cell.MultiRNNCell(rnn_layer)
-        outputs, state = tf.nn.dynamic_rnn(cell = multi_rnn_cell, inputs = concatVoice, dtype = tf.float32)
+        outputs, state = tf.nn.dynamic_rnn(cell = multi_rnn_cell, inputs = self.x_mixed_src, dtype = tf.float32)
 
         #全连接层
-        y_dense_sing_src = tf.layers.dense(
+        y_dense_music_src = tf.layers.dense(
             inputs = outputs,
             units = self.num_features,
             activation = tf.nn.relu,
-            name = 'y_dense_sing_src')
-        
+            name = 'y_dense_music_src')
 
-        y_sing_src = y_dense_sing_src + self.x_mixed_src
+        y_dense_voice_src = tf.layers.dense(
+            inputs = outputs,
+            units = self.num_features,
+            activation = tf.nn.relu,
+            name = 'y_dense_voice_src')
 
-        return y_sing_src
+        y_music_src = y_dense_music_src / (y_dense_music_src + y_dense_voice_src + np.finfo(float).eps) * self.x_mixed_src
+        y_voice_src = y_dense_voice_src / (y_dense_music_src + y_dense_voice_src + np.finfo(float).eps) * self.x_mixed_src
+
+        return y_music_src, y_voice_src
 
     #保存模型
     def save(self, directory, filename, global_step):
@@ -136,24 +135,24 @@ class SVMRNN(object):
 
 
     #开始训练
-    def train(self, x_mixed_src, y_label_src, learning_rate, dropout_rate):
+    def train(self, x_mixed_src, y_music_src, y_voice_src, learning_rate, dropout_rate):
         #已经训练了多少步
         # step = self.sess.run(self.g_step)
 
         _, train_loss = self.sess.run([self.optimizer, self.loss],
-            feed_dict = {self.x_mixed_src: x_mixed_src, self.y_label_src: y_label_src,
+            feed_dict = {self.x_mixed_src: x_mixed_src, self.y_music_src: y_music_src, self.y_voice_src: y_voice_src,
                          self.learning_rate: learning_rate, self.dropout_rate: dropout_rate})
         return train_loss
 
     #验证
-    def validate(self, x_mixed_src, y_label_src, dropout_rate):
-        y_sing_src_pred, validate_loss = self.sess.run([self.y_pred_sing_src, self.loss],
-            feed_dict = {self.x_mixed_src: x_mixed_src, self.y_label_src: y_label_src, self.dropout_rate: dropout_rate})
-        return y_sing_src_pred, validate_loss
+    def validate(self, x_mixed_src, y_music_src, y_voice_src, dropout_rate):
+        y_music_src_pred, y_voice_src_pred, validate_loss = self.sess.run([self.y_pred_music_src, self.y_pred_voice_src, self.loss],
+            feed_dict = {self.x_mixed_src: x_mixed_src, self.y_music_src: y_music_src, self.y_voice_src: y_voice_src, self.dropout_rate: dropout_rate})
+        return y_music_src_pred, y_voice_src_pred, validate_loss
 
     #测试
     def test(self, x_mixed_src, dropout_rate):
-        y_sing_src_pred = self.sess.run([self.y_pred_sing_src,],
+        y_music_src_pred, y_voice_src_pred = self.sess.run([self.y_pred_music_src, self.y_pred_voice_src],
                                          feed_dict = {self.x_mixed_src: x_mixed_src, self.dropout_rate: dropout_rate})
 
-        return y_sing_src_pred
+        return y_music_src_pred, y_voice_src_pred
